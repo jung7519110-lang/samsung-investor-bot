@@ -1,7 +1,7 @@
 """
 반도체·AI 뉴스 속보 텔레그램 알림
 - 뉴스: 06~22시 1시간마다 정리, 22~06시는 모아서 06시에 발송
-- 공시: 시간 상관없이 15분마다 즉시 발송
+- 공시: 06~22시 15분마다 즉시 발송, 22~06시는 모아서 06시에 발송
 
 - 구글 뉴스 RSS에서 최근 기사를 모은 뒤 3중 필터로 거릅니다.
   1) 회사·주제 키워드 + 중요 사건 키워드가 함께 있어야 통과
@@ -209,10 +209,11 @@ def select_news(items: list[dict], seen: dict, now: datetime) -> list[dict]:
 def fetch_dart(api_key: str, seen: dict, now: datetime) -> list[dict]:
     out = []
     today = now.strftime("%Y%m%d")
+    yesterday = (now - timedelta(days=1)).strftime("%Y%m%d")   # 자정 전후 공시를 놓치지 않도록 어제부터 조회
     for corp, name in DART_CORPS.items():
         try:
             r = requests.get("https://opendart.fss.or.kr/api/list.json", timeout=20, params={
-                "crtfc_key": api_key, "corp_code": corp, "bgn_de": today, "end_de": today, "page_count": 20})
+                "crtfc_key": api_key, "corp_code": corp, "bgn_de": yesterday, "end_de": today, "page_count": 20})
             data = r.json()
             for d in data.get("list", []):
                 rid = "dart:" + d["rcept_no"]
@@ -312,7 +313,7 @@ def main() -> int:
     now = datetime.now(KST)
     seen = load_seen()
     seen.setdefault("pending_news", [])
-    seen.setdefault("pending_dart", [])   # 예전 버전에서 남은 공시가 있으면 함께 보냄
+    seen.setdefault("pending_dart", [])
     seen.setdefault("last_news_hour", "")
     first_run = not seen["ids"]
 
@@ -327,13 +328,21 @@ def main() -> int:
     for d in disclosures:
         seen["ids"][d["id"]] = time.time()
 
-    # 1) 공시: 시간과 상관없이 찾는 즉시(15분마다) 발송
-    dart_all = seen["pending_dart"] + disclosures
-    if dart_all:
-        title = f"📢 <b>공시 알림</b> ({now:%m/%d %H:%M})"
-        for msg in build_message([], dart_all, now, title):
-            send_telegram(msg)
-        seen["pending_dart"] = []
+    # 1) 공시: 낮에는 찾는 즉시(15분마다) 발송, 밤에는 모아뒀다가 아침에 발송
+    if is_quiet(now):
+        seen["pending_dart"] += disclosures
+        print(f"조용한 시간: 공시 {len(disclosures)}건 보관 (누적 {len(seen['pending_dart'])}건)")
+    else:
+        night = seen["pending_dart"]
+        if night:
+            title = f"🌙 <b>밤사이 공시</b> ({QUIET_START}:00~{now:%H:%M})"
+            for msg in build_message([], night, now, title):
+                send_telegram(msg)
+            seen["pending_dart"] = []
+        if disclosures:
+            title = f"📢 <b>공시 알림</b> ({now:%m/%d %H:%M})"
+            for msg in build_message([], disclosures, now, title):
+                send_telegram(msg)
 
     # 2) 뉴스: 일단 모아두고, 낮 시간에는 1시간에 한 번, 밤에는 보내지 않음
     seen["pending_news"] += [to_store(n) for n in news]
