@@ -1,5 +1,7 @@
 """
-반도체·AI 뉴스 속보 텔레그램 알림 (15분 묶음)
+반도체·AI 뉴스 속보 텔레그램 알림
+- 뉴스: 06~22시 1시간마다 정리, 22~06시는 모아서 06시에 발송
+- 공시: 시간 상관없이 15분마다 즉시 발송
 
 - 구글 뉴스 RSS에서 최근 기사를 모은 뒤 3중 필터로 거릅니다.
   1) 회사·주제 키워드 + 중요 사건 키워드가 함께 있어야 통과
@@ -27,7 +29,7 @@ import requests
 
 KST = timezone(timedelta(hours=9))
 SEEN_FILE = os.getenv("SEEN_FILE", "seen.json")
-LOOKBACK_MIN = int(os.getenv("LOOKBACK_MIN", "90"))   # 이 시간 안에 나온 기사만 대상
+LOOKBACK_MIN = int(os.getenv("LOOKBACK_MIN", "120"))   # 이 시간 안에 나온 기사만 대상
 MAX_ITEMS = int(os.getenv("MAX_ITEMS", "15"))          # 한 번에 보낼 최대 기사 수
 
 # ---------- 필터 설정 (원하면 여기만 고치면 됩니다) ----------
@@ -252,7 +254,7 @@ def build_message(news: list[dict], disclosures: list[dict], now: datetime, titl
             else:
                 tag = judge(n["title"], GOOD_KO, BAD_KO)
             tags.append(tag)
-            t = f"{n['time']:%m/%d %H:%M} " if (n["time"] and title) else (f"{n['time']:%H:%M} " if n["time"] else "")
+            t = f"{n['time']:%m/%d %H:%M} " if n["time"] else ""
             flag = "🌐 " if n["lang"] == "en" else ""
             body.append(f"{tag} {t}{flag}<a href=\"{html.escape(n['link'])}\">{html.escape(n['title'])}</a> "
                         f"<i>{html.escape(n['source'])}</i>")
@@ -310,7 +312,8 @@ def main() -> int:
     now = datetime.now(KST)
     seen = load_seen()
     seen.setdefault("pending_news", [])
-    seen.setdefault("pending_dart", [])
+    seen.setdefault("pending_dart", [])   # 예전 버전에서 남은 공시가 있으면 함께 보냄
+    seen.setdefault("last_news_hour", "")
     first_run = not seen["ids"]
 
     news = select_news(fetch_news(), seen, now)
@@ -324,27 +327,35 @@ def main() -> int:
     for d in disclosures:
         seen["ids"][d["id"]] = time.time()
 
+    # 1) 공시: 시간과 상관없이 찾는 즉시(15분마다) 발송
+    dart_all = seen["pending_dart"] + disclosures
+    if dart_all:
+        title = f"📢 <b>공시 알림</b> ({now:%m/%d %H:%M})"
+        for msg in build_message([], dart_all, now, title):
+            send_telegram(msg)
+        seen["pending_dart"] = []
+
+    # 2) 뉴스: 일단 모아두고, 낮 시간에는 1시간에 한 번, 밤에는 보내지 않음
+    seen["pending_news"] += [to_store(n) for n in news]
+    hour_key = now.strftime("%Y%m%d%H")
     if is_quiet(now):
-        # 밤에는 보내지 않고 모아두기
-        seen["pending_news"] += [to_store(n) for n in news]
-        seen["pending_dart"] += disclosures
-        print(f"조용한 시간: 뉴스 {len(news)}건, 공시 {len(disclosures)}건 보관 "
-              f"(누적 뉴스 {len(seen['pending_news'])}, 공시 {len(seen['pending_dart'])})")
+        print(f"조용한 시간: 뉴스 {len(news)}건 보관 (누적 {len(seen['pending_news'])}건)")
+    elif seen["last_news_hour"] == hour_key:
+        print(f"이번 시간대 이미 발송함: 뉴스 {len(news)}건 보관 (누적 {len(seen['pending_news'])}건)")
     else:
-        pend_news = [from_store(x) for x in seen["pending_news"]]
-        pend_dart = seen["pending_dart"]
-        if pend_news or pend_dart:
-            # 아침 몰아보기: 밤사이 모인 것 + 지금 새로 찾은 것
-            all_news = sorted(pend_news + news, key=lambda x: x["time"] or now)[-MORNING_MAX:]
-            title = f"🌙 <b>밤사이 반도체·AI 소식</b> ({QUIET_START}:00~{now:%H:%M})"
-            for msg in build_message(all_news, pend_dart + disclosures, now, title):
-                send_telegram(msg)
-            seen["pending_news"], seen["pending_dart"] = [], []
-        elif news or disclosures:
-            for msg in build_message(news, disclosures, now):
+        pend = [from_store(x) for x in seen["pending_news"]]
+        if pend:
+            pend = sorted(pend, key=lambda x: x["time"] or now)[-MORNING_MAX:]
+            if now.hour == QUIET_END:
+                title = f"🌙 <b>밤사이 반도체·AI 뉴스</b> ({QUIET_START}:00~{now:%H:%M})"
+            else:
+                title = f"📰 <b>반도체·AI 뉴스</b> ({now:%m/%d %H}시 정리)"
+            for msg in build_message(pend, [], now, title):
                 send_telegram(msg)
         else:
-            print("새로 보낼 기사 없음")
+            print("이번 시간대 새 뉴스 없음")
+        seen["pending_news"] = []
+        seen["last_news_hour"] = hour_key
 
     save_seen(seen)
     if first_run:
