@@ -224,39 +224,59 @@ def fetch_dart(api_key: str, seen: dict, now: datetime) -> list[dict]:
 
 
 # ---------- 전송 ----------
-def build_message(news: list[dict], disclosures: list[dict], now: datetime) -> str:
-    lines = [f"📰 <b>반도체·AI 속보</b> ({now:%m/%d %H:%M})"]
-    tags = []
+QUIET_START = int(os.getenv("QUIET_START", "22"))   # 이 시각부터
+QUIET_END = int(os.getenv("QUIET_END", "6"))        # 이 시각 전까지는 보내지 않고 모아둠
+MORNING_MAX = int(os.getenv("MORNING_MAX", "40"))   # 아침 몰아보기 최대 기사 수
+
+
+def is_quiet(now: datetime) -> bool:
+    return now.hour >= QUIET_START or now.hour < QUIET_END
+
+
+def build_message(news: list[dict], disclosures: list[dict], now: datetime, title: str | None = None) -> list[str]:
+    """텔레그램 글자 수 제한(4096자)을 넘으면 여러 개로 나눠서 돌려줌"""
+    head = title or f"📰 <b>반도체·AI 속보</b> ({now:%m/%d %H:%M})"
+    body, tags = [], []
     if disclosures:
-        lines.append("\n<b>📢 공시</b>")
+        body.append("\n<b>📢 공시</b>")
         for d in disclosures:
             tag = judge(d["title"], GOOD_DART, BAD_DART)
             tags.append(tag)
-            lines.append(f"{tag} <b>{html.escape(d['name'])}</b> "
-                         f"<a href=\"{html.escape(d['link'])}\">{html.escape(d['title'])}</a>")
+            body.append(f"{tag} <b>{html.escape(d['name'])}</b> "
+                        f"<a href=\"{html.escape(d['link'])}\">{html.escape(d['title'])}</a>")
     if news:
-        lines.append("\n<b>🗞 뉴스</b>")
+        body.append("\n<b>🗞 뉴스</b>")
         for n in news:
             if n["lang"] == "en":
                 tag = judge(n["title"], GOOD_EN, BAD_EN)
             else:
                 tag = judge(n["title"], GOOD_KO, BAD_KO)
             tags.append(tag)
-            t = f"{n['time']:%H:%M} " if n["time"] else ""
+            t = f"{n['time']:%m/%d %H:%M} " if (n["time"] and title) else (f"{n['time']:%H:%M} " if n["time"] else "")
             flag = "🌐 " if n["lang"] == "en" else ""
-            lines.append(f"{tag} {t}{flag}<a href=\"{html.escape(n['link'])}\">{html.escape(n['title'])}</a> "
-                         f"<i>{html.escape(n['source'])}</i>")
+            body.append(f"{tag} {t}{flag}<a href=\"{html.escape(n['link'])}\">{html.escape(n['title'])}</a> "
+                        f"<i>{html.escape(n['source'])}</i>")
     good = sum(1 for x in tags if "호재" in x)
     bad = sum(1 for x in tags if "악재" in x)
     neutral = len(tags) - good - bad
-    lines.insert(1, f"요약: 🔴 호재 {good} · 🔵 악재 {bad} · ⚪ 중립 {neutral}")
-    lines.append("\n<i>※ 호재/악재는 제목 단어로 자동 판단한 참고용입니다.</i>")
-    return "\n".join(lines)
+    summary = f"요약: 🔴 호재 {good} · 🔵 악재 {bad} · ⚪ 중립 {neutral}"
+    foot = "\n<i>※ 호재/악재는 제목 단어로 자동 판단한 참고용입니다.</i>"
+
+    chunks, cur = [], [head, summary]
+    for line in body:
+        if len("\n".join(cur + [line, foot])) > 3900:
+            chunks.append("\n".join(cur))
+            cur = [head + " (이어서)"]
+        cur.append(line)
+    cur.append(foot)
+    chunks.append("\n".join(cur))
+    return chunks
 
 
 def send_telegram(text: str) -> None:
     if os.getenv("DRY_RUN") == "1":
         print(text)
+        print("-" * 40)
         return
     r = requests.post(
         f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
@@ -268,25 +288,64 @@ def send_telegram(text: str) -> None:
         raise RuntimeError(f"텔레그램 전송 실패: {r.status_code} {r.text}")
 
 
+# 밤사이 모아둔 항목 저장/복원
+def to_store(n: dict) -> dict:
+    d = dict(n)
+    if hasattr(d.get("time"), "isoformat"):
+        d["time"] = d["time"].isoformat()
+    return d
+
+
+def from_store(d: dict) -> dict:
+    n = dict(d)
+    if n.get("time"):
+        try:
+            n["time"] = datetime.fromisoformat(n["time"])
+        except Exception:
+            n["time"] = None
+    return n
+
+
 def main() -> int:
     now = datetime.now(KST)
     seen = load_seen()
+    seen.setdefault("pending_news", [])
+    seen.setdefault("pending_dart", [])
     first_run = not seen["ids"]
 
     news = select_news(fetch_news(), seen, now)
     dart_key = os.getenv("DART_API_KEY", "").strip()
     disclosures = fetch_dart(dart_key, seen, now) if dart_key else []
 
-    if news or disclosures:
-        send_telegram(build_message(news, disclosures, now))
-    else:
-        print("새로 보낼 기사 없음")
-
+    # 새로 찾은 항목은 바로 '본 것'으로 기록 (다시 찾지 않도록)
     for n in news:
         seen["ids"][n["id"]] = time.time()
         seen["titles"].append(["\u0001".join(sorted(tokens(n["title"]))), time.time()])
     for d in disclosures:
         seen["ids"][d["id"]] = time.time()
+
+    if is_quiet(now):
+        # 밤에는 보내지 않고 모아두기
+        seen["pending_news"] += [to_store(n) for n in news]
+        seen["pending_dart"] += disclosures
+        print(f"조용한 시간: 뉴스 {len(news)}건, 공시 {len(disclosures)}건 보관 "
+              f"(누적 뉴스 {len(seen['pending_news'])}, 공시 {len(seen['pending_dart'])})")
+    else:
+        pend_news = [from_store(x) for x in seen["pending_news"]]
+        pend_dart = seen["pending_dart"]
+        if pend_news or pend_dart:
+            # 아침 몰아보기: 밤사이 모인 것 + 지금 새로 찾은 것
+            all_news = sorted(pend_news + news, key=lambda x: x["time"] or now)[-MORNING_MAX:]
+            title = f"🌙 <b>밤사이 반도체·AI 소식</b> ({QUIET_START}:00~{now:%H:%M})"
+            for msg in build_message(all_news, pend_dart + disclosures, now, title):
+                send_telegram(msg)
+            seen["pending_news"], seen["pending_dart"] = [], []
+        elif news or disclosures:
+            for msg in build_message(news, disclosures, now):
+                send_telegram(msg)
+        else:
+            print("새로 보낼 기사 없음")
+
     save_seen(seen)
     if first_run:
         print("첫 실행: 기록 파일을 새로 만들었습니다.")
