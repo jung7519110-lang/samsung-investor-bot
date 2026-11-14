@@ -1,0 +1,32 @@
+name: 삼성전자 투자자별 매매동향 알림
+
+on:
+  schedule:
+    # GitHub cron은 UTC 기준 (한국시간 = UTC + 9)
+    - cron: "0 9 * * 1-5"    # 평일 18:00 KST (당일 확정치 포함)
+  workflow_dispatch:          # Actions 탭에서 수동 실행(테스트용)
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Run
+        env:
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          STOCK_CODE: "005930"
+          STOCK_NAME: "삼성전자"
+          DAYS: "7"
+        run: python kis_investor_bot.py
