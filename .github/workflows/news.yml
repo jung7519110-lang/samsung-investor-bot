@@ -1,0 +1,47 @@
+name: 반도체·AI 뉴스 속보 알림
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # 15분마다, 24시간
+  workflow_dispatch:          # Actions 탭에서 수동 실행(테스트용)
+
+concurrency:
+  group: news-bot
+  cancel-in-progress: false
+
+jobs:
+  news:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install requests
+
+      # 이미 보낸 기사 기록 불러오기
+      - name: Restore seen
+        uses: actions/cache/restore@v4
+        with:
+          path: seen.json
+          key: news-seen-${{ github.run_id }}
+          restore-keys: news-seen-
+
+      - name: Run
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+        run: python news_bot.py
+
+      # 기록 저장
+      - name: Save seen
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: seen.json
+          key: news-seen-${{ github.run_id }}
