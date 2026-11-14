@@ -6,7 +6,7 @@
 필요한 환경변수 (GitHub Secrets로 등록)
   KIS_APP_KEY, KIS_APP_SECRET, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 선택 환경변수
-  STOCK_CODE (기본 005930), STOCK_NAME (기본 삼성전자), DAYS (기본 7)
+  STOCKS (기본 "005930:삼성전자,000660:SK하이닉스"), DAYS (기본 7)
   DRY_RUN=1  → 텔레그램으로 보내지 않고 화면에만 출력
 """
 
@@ -21,8 +21,8 @@ KIS_BASE = "https://openapi.koreainvestment.com:9443"
 KST = timezone(timedelta(hours=9))
 WEEKDAYS = "월화수목금토일"
 
-STOCK_CODE = os.getenv("STOCK_CODE", "005930")
-STOCK_NAME = os.getenv("STOCK_NAME", "삼성전자")
+# "종목코드:이름" 을 쉼표로 구분
+STOCKS = [tuple(x.split(":", 1)) for x in os.getenv("STOCKS", "005930:삼성전자,000660:SK하이닉스").split(",") if x.strip()]
 DAYS = int(os.getenv("DAYS", "7"))
 
 INVESTORS = [("개인", "prsn"), ("외국인", "frgn"), ("기관", "orgn")]
@@ -42,7 +42,7 @@ def get_token(app_key: str, app_secret: str) -> str:
     return data["access_token"]
 
 
-def fetch_investor(token: str, app_key: str, app_secret: str) -> list[dict]:
+def fetch_investor(token: str, app_key: str, app_secret: str, code: str) -> list[dict]:
     headers = {
         "content-type": "application/json; charset=utf-8",
         "authorization": f"Bearer {token}",
@@ -51,7 +51,7 @@ def fetch_investor(token: str, app_key: str, app_secret: str) -> list[dict]:
         "tr_id": "FHKST01010900",
         "custtype": "P",
     }
-    params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": STOCK_CODE}
+    params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code}
     r = requests.get(
         f"{KIS_BASE}/uapi/domestic-stock/v1/quotations/inquire-investor",
         headers=headers, params=params, timeout=15,
@@ -73,7 +73,10 @@ def to_int(v) -> int:
 
 def man(q: int, signed: bool = False) -> str:
     """주 → 만주 (소수 1자리)"""
-    return f"{q / 10000:+,.1f}" if signed else f"{q / 10000:,.1f}"
+    v = round(q / 10000, 1) + 0.0  # -0.0 방지
+    if v == 0:
+        v = 0.0
+    return f"{v:+,.1f}" if signed and v != 0 else f"{v:,.1f}"
 
 
 def parse_rows(output: list[dict]) -> list[dict]:
@@ -107,9 +110,9 @@ def pct_change(r: dict) -> float:
     return (r["close"] / prev - 1) * 100 if prev else 0.0
 
 
-def build_caption(rows: list[dict], now: datetime) -> str:
+def build_caption(rows: list[dict], now: datetime, code: str, name_: str) -> str:
     lines = [
-        f"📊 <b>{html.escape(STOCK_NAME)}({STOCK_CODE}) 투자자별 매매동향</b>",
+        f"📊 <b>{html.escape(name_)}({code}) 투자자별 매매동향</b>",
         f"{now:%Y-%m-%d %H:%M} 기준 · 최근 {len(rows)}거래일",
         "",
         "<b>기간 순매수 합계 (만주)</b>",
@@ -140,7 +143,7 @@ def _korean_font():
     return None
 
 
-def build_table_image(rows: list[dict], now: datetime, path: str = "table.png") -> str:
+def build_table_image(rows: list[dict], now: datetime, code: str, name_: str, path: str = "table.png") -> str:
     """일자별 개인·외국인·기관 매수/매도/순매수 표를 PNG로 저장"""
     import matplotlib
     matplotlib.use("Agg")
@@ -185,7 +188,7 @@ def build_table_image(rows: list[dict], now: datetime, path: str = "table.png") 
                 color=color, fontsize=size, fontweight=weight)
 
     # 제목
-    ax.text(0.15, 0.55, f"{STOCK_NAME}({STOCK_CODE}) 투자자별 매매동향",
+    ax.text(0.15, 0.55, f"{name_}({code}) 투자자별 매매동향",
             fontsize=16, fontweight="bold", color="#111111", va="center")
     ax.text(0.15, 1.15, f"{now:%Y-%m-%d %H:%M} 기준 · 최근 {n}거래일 · 단위: 만주 (빨강=순매수, 파랑=순매도)",
             fontsize=10, color="#666666", va="center")
@@ -274,20 +277,29 @@ def main() -> int:
     try:
         key, secret = os.environ["KIS_APP_KEY"], os.environ["KIS_APP_SECRET"]
         token = get_token(key, secret)
-        rows = parse_rows(fetch_investor(token, key, secret))
-        if not rows:
-            raise RuntimeError("응답에 데이터가 없습니다.")
-        img = build_table_image(rows, now)
-        send_telegram_photo(img, build_caption(rows, now))
-        return 0
-    except Exception as e:  # 실패도 텔레그램으로 알림
-        msg = f"⚠️ {STOCK_NAME} 매매동향 알림 실패 ({now:%m/%d %H:%M})\n{e}"
+    except Exception as e:
+        msg = f"⚠️ 매매동향 알림 실패 ({now:%m/%d %H:%M})\n토큰 발급 오류: {e}"
         print(msg, file=sys.stderr)
-        try:
-            send_telegram(html.escape(msg))
-        except Exception as e2:
-            print(f"오류 알림도 실패: {e2}", file=sys.stderr)
+        send_telegram(html.escape(msg))
         return 1
+
+    failed = 0
+    for code, name_ in STOCKS:
+        try:
+            rows = parse_rows(fetch_investor(token, key, secret, code))
+            if not rows:
+                raise RuntimeError("응답에 데이터가 없습니다.")
+            img = build_table_image(rows, now, code, name_, path=f"table_{code}.png")
+            send_telegram_photo(img, build_caption(rows, now, code, name_))
+        except Exception as e:  # 한 종목이 실패해도 나머지는 계속
+            failed += 1
+            msg = f"⚠️ {name_}({code}) 매매동향 알림 실패 ({now:%m/%d %H:%M})\n{e}"
+            print(msg, file=sys.stderr)
+            try:
+                send_telegram(html.escape(msg))
+            except Exception as e2:
+                print(f"오류 알림도 실패: {e2}", file=sys.stderr)
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
