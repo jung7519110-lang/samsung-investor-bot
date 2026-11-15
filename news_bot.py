@@ -378,5 +378,44 @@ def main() -> int:
     return 0
 
 
+def _scrub(text: str) -> str:
+    """오류 메시지에 섞여 들어올 수 있는 키 값을 지운다(requests 오류는 요청 URL을 포함한다)."""
+    for name in ("TELEGRAM_BOT_TOKEN", "DART_API_KEY", "KIS_APP_SECRET", "KIS_APP_KEY"):
+        v = os.getenv(name, "")
+        if v and v in text:
+            text = text.replace(v, "***")
+    return text
+
+
+def alert_failure(exc: BaseException) -> None:
+    """워크플로가 실패하면 텔레그램으로도 알린다 (GitHub Actions 실행 링크 포함).
+
+    GitHub Actions는 실행 로그를 열어야만 실패를 알 수 있어서, 조용히 봇이 멈춘 것처럼
+    보이는 일이 없도록 실패 자체를 텔레그램으로 보낸다.
+    """
+    reason = _scrub(str(exc))[:300]
+    if os.getenv("DRY_RUN") == "1":
+        print(f"[실패 알림] {reason}", file=sys.stderr)
+        return
+    run_url = ""
+    if os.getenv("GITHUB_RUN_ID"):
+        server = os.getenv("GITHUB_SERVER_URL", "https://github.com")
+        repo = os.getenv("GITHUB_REPOSITORY", "")
+        run_url = f"\n로그: {server}/{repo}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+    text = ("⚠️ <b>뉴스 봇 실행 실패</b>\n"
+            f"시각: {datetime.now(KST):%m/%d %H:%M} KST\n"
+            f"사유: {html.escape(reason)}\n"
+            f"다음 주기 실행에서 자동으로 다시 시도합니다.{run_url}")
+    try:
+        send_telegram(text)
+    except Exception as e:
+        print(f"실패 알림 전송도 실패: {e}", file=sys.stderr)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as e:   # 실패를 텔레그램으로도 알리고, 워크플로는 실패로 남긴다
+        print(f"오류: {e}", file=sys.stderr)
+        alert_failure(e)
+        raise
