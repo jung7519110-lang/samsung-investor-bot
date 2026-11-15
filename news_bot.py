@@ -119,6 +119,7 @@ def parse_feed(xml_text: str) -> list[dict]:
 
 def fetch_news() -> list[dict]:
     out = []
+    failed = 0
     for query, lang in FEEDS:
         try:
             r = requests.get(feed_url(query, lang), timeout=20, headers={"User-Agent": "Mozilla/5.0"})
@@ -127,8 +128,13 @@ def fetch_news() -> list[dict]:
                 item["lang"] = lang
                 out.append(item)
         except Exception as e:
+            failed += 1
             print(f"피드 오류({query}): {e}", file=sys.stderr)
         time.sleep(1)
+    # 피드가 전부 실패하면(구글 뉴스 503 등) '새 뉴스 없음'처럼 조용히 성공으로 넘어가지 않고
+    # 실패로 끝내서, 워크플로 실패 알림이 텔레그램으로 나가게 한다.
+    if failed and failed == len(FEEDS):
+        raise RuntimeError(f"뉴스 수집 실패: 피드 {len(FEEDS)}개 모두 응답 오류(일시적 차단/장애 가능)")
     return out
 
 
