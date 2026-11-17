@@ -3,7 +3,8 @@ name: 투자자별 매매동향 알림
 on:
   schedule:
     # GitHub cron은 UTC 기준 (한국시간 = UTC + 9)
-    - cron: "17 9 * * 1-5"    # 평일 18:00 KST (당일 확정치 포함)
+    - cron: "45 6 * * 1-5"    # 평일 15:45 KST (15:35 1차 확정치)
+    - cron: "17 9 * * 1-5"    # 평일 18:17 KST (18:00 최종 확정치)
   workflow_dispatch:          # Actions 탭에서 수동 실행(테스트용)
 
 jobs:
