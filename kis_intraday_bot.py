@@ -19,7 +19,7 @@ from datetime import datetime
 
 import requests
 
-from kis_investor_bot import KIS_BASE, KST, STOCKS, get_token, man, send_telegram, to_int
+from kis_investor_bot import KIS_BASE, KST, STOCKS, drop_token, get_token, man, send_telegram, to_int
 
 
 def _get(token: str, key: str, secret: str, path: str, tr_id: str, params: dict) -> dict:
@@ -129,6 +129,8 @@ def main() -> int:
         "<i>※ 증권사 집계 추정치(개인 미제공). 확정치는 장 마감 후 표로 보내드려요.</i>",
     ])
     send_telegram(text)
+    if len(errors) == len(STOCKS):
+        drop_token()  # 토큰 문제일 수 있으니 다음 실행 때 새로 발급
     return 1 if errors else 0
 
 

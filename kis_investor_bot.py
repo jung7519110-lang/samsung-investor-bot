@@ -29,7 +29,60 @@ INVESTORS = [("개인", "prsn"), ("외국인", "frgn"), ("기관", "orgn")]
 
 
 # ---------- KIS API ----------
+TOKEN_CACHE = os.getenv("KIS_TOKEN_CACHE", "kis_token.enc")
+
+
+def _keystream(secret: str, nonce: bytes, n: int) -> bytes:
+    import hashlib
+    out, i = b"", 0
+    while len(out) < n:
+        out += hashlib.sha256(secret.encode() + b"|enc|" + nonce + i.to_bytes(4, "big")).digest()
+        i += 1
+    return out[:n]
+
+
+def _save_token(token: str, expires_at: float, app_secret: str) -> None:
+    """토큰을 APP_SECRET으로 암호화해 저장 (공개 저장소 캐시라도 비밀값 없이는 못 읽음)"""
+    import hashlib, hmac, json
+    plain = json.dumps({"token": token, "exp": expires_at}).encode()
+    nonce = os.urandom(16)
+    body = nonce + bytes(a ^ b for a, b in zip(plain, _keystream(app_secret, nonce, len(plain))))
+    tag = hmac.new(app_secret.encode(), body, hashlib.sha256).digest()
+    with open(TOKEN_CACHE, "wb") as f:
+        f.write(tag + body)
+
+
+def _load_token(app_secret: str) -> str | None:
+    import hashlib, hmac, json, time
+    try:
+        with open(TOKEN_CACHE, "rb") as f:
+            data = f.read()
+        tag, body = data[:32], data[32:]
+        if not hmac.compare_digest(tag, hmac.new(app_secret.encode(), body, hashlib.sha256).digest()):
+            return None
+        nonce, enc = body[:16], body[16:]
+        info = json.loads(bytes(a ^ b for a, b in zip(enc, _keystream(app_secret, nonce, len(enc)))))
+        # 만료 1시간 전까지만 재사용
+        return info["token"] if info["exp"] - time.time() > 3600 else None
+    except Exception:
+        return None
+
+
+def drop_token() -> None:
+    """빈 파일로 덮어써서 다음 실행 때 새로 발급되게 함 (빈 파일도 캐시에 저장돼 옛 토큰을 대체)"""
+    try:
+        open(TOKEN_CACHE, "wb").close()
+    except OSError:
+        pass
+
+
 def get_token(app_key: str, app_secret: str) -> str:
+    """저장된 토큰이 유효하면 재사용 (발급할 때마다 증권사 문자가 오므로 하루 1회만 발급)"""
+    import time
+    cached = _load_token(app_secret)
+    if cached:
+        print("저장된 접근토큰 재사용")
+        return cached
     r = requests.post(
         f"{KIS_BASE}/oauth2/tokenP",
         json={"grant_type": "client_credentials", "appkey": app_key, "appsecret": app_secret},
@@ -39,7 +92,13 @@ def get_token(app_key: str, app_secret: str) -> str:
     data = r.json()
     if "access_token" not in data:
         raise RuntimeError(f"토큰 발급 실패: {data}")
-    return data["access_token"]
+    token = data["access_token"]
+    try:
+        _save_token(token, time.time() + int(data.get("expires_in", 86400)), app_secret)
+    except Exception as e:
+        print(f"토큰 저장 실패(다음 실행 때 새로 발급): {e}", file=sys.stderr)
+    print("접근토큰 새로 발급")
+    return token
 
 
 def fetch_investor(token: str, app_key: str, app_secret: str, code: str) -> list[dict]:
@@ -299,6 +358,8 @@ def main() -> int:
                 send_telegram(html.escape(msg))
             except Exception as e2:
                 print(f"오류 알림도 실패: {e2}", file=sys.stderr)
+    if failed == len(STOCKS):
+        drop_token()  # 토큰 문제일 수 있으니 다음 실행 때 새로 발급
     return 1 if failed else 0
 
 

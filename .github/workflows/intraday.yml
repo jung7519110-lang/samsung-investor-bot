@@ -24,6 +24,14 @@ jobs:
       - name: Install
         run: pip install requests
 
+      # 접근토큰 재사용(암호화 저장) — 발급 문자를 하루 1통으로
+      - name: Restore KIS token
+        uses: actions/cache/restore@v4
+        with:
+          path: kis_token.enc
+          key: kis-token-${{ github.run_id }}
+          restore-keys: kis-token-
+
       - name: Run
         env:
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
@@ -32,3 +40,10 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           STOCKS: "005930:삼성전자,000660:SK하이닉스"
         run: python kis_intraday_bot.py
+
+      - name: Save KIS token
+        if: always() && hashFiles('kis_token.enc') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: kis_token.enc
+          key: kis-token-${{ github.run_id }}
